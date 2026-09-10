@@ -1,5 +1,5 @@
-export const round = (value) => Math.round((value + Number.EPSILON) * 100) / 100;
-export const signed = (value) => `${value > 0 ? '+' : value < 0 ? '−' : ''}${Math.abs(value).toFixed(2)}`;
+export const round = (value) => Math.round((value + Number.EPSILON) * 1000) / 1000;
+export const signed = (value) => `${value > 0 ? '+' : value < 0 ? '−' : ''}${Math.abs(value).toFixed(3)}`;
 
 export function validateRows(rows) {
   if (!Array.isArray(rows) || !rows.length) throw new Error('No daily observations');
@@ -7,7 +7,7 @@ export function validateRows(rows) {
   return rows.map(row => {
     if (!/^2026-\d{2}-\d{2}$/.test(row.date) || row.date <= previous || !Number.isFinite(row.brent) || !Number.isFinite(row.wti) || row.brent <= 0 || row.wti <= 0) throw new Error('Invalid daily observation');
     previous = row.date;
-    return { date: row.date, brent: row.brent, wti: row.wti, spread: round(row.brent - row.wti) };
+    return { date: row.date, brent: row.brent, wti: row.wti, spread: Math.round((row.brent - row.wti) * 1e6) / 1e6 };
   });
 }
 
