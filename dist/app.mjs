@@ -1,8 +1,9 @@
 import { round, signed, validateRows, filterRows, summarize, monthlyAverages, chartDomain } from './data-utils.mjs';
 import { fetchSnapshot, fetchMarket, calculateShortSpreadFunding, DAY } from './hyperliquid.mjs';
+import { fetchFundingSnapshot, createFundingSnapshot, dailyFundingRates } from './funding-history.mjs';
 
 const $ = id => document.getElementById(id);
-const state = { rows: [], rawDates: [], range: 'ytd', view: 'spread', visible: [], chart: null, selectedDate: null, market: null, metadata: null, basis: 'quantity', marketMode: 'snapshot', historyMode: 'snapshot', refreshing: false };
+const state = { rows: [], rawDates: [], range: 'ytd', view: 'spread', visible: [], chart: null, selectedDate: null, market: null, metadata: null, basis: 'quantity', marketMode: 'snapshot', historyMode: 'snapshot', refreshing: false, fundingSnapshot: null, fundingDaily: new Map(), fundingChart: null, fundingHistoryMode: 'loading', fundingRefreshing: false };
 const labels = { ytd: '今年以来', '1m': '近 1 月', '3m': '近 3 月' };
 const money = value => `${value.toFixed(3)}<small>美元 / 桶</small>`;
 const shortDate = date => `${Number(date.slice(5, 7))} 月 ${Number(date.slice(8))} 日`;
@@ -112,7 +113,8 @@ function renderTable() {
     const previous = state.rows[index - 1];
     const change = previous ? round(row.spread - previous.spread) : null;
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${row.date}</td><td>${row.brent.toFixed(3)}</td><td>${row.wti.toFixed(3)}</td><td>${row.spread.toFixed(3)}</td><td class="${change === null ? '' : priceClass(change)}">${change === null ? '—' : signed(change)}</td>`;
+    const funding = state.fundingDaily.get(row.date);
+    tr.innerHTML = `<td>${row.date}</td><td>${row.brent.toFixed(3)}</td><td>${row.wti.toFixed(3)}</td><td>${row.spread.toFixed(3)}</td><td class="${change === null ? '' : priceClass(change)}">${change === null ? '—' : signed(change)}</td><td class="${funding ? priceClass(funding.longRate) : 'history-missing'}">${funding ? percent(funding.longRate) : '—'}</td><td class="${funding ? priceClass(funding.shortRate) : 'history-missing'}">${funding ? percent(funding.shortRate) : '—'}</td><td>${funding ? `${funding.count} / 24` : '—'}</td>`;
     fragment.append(tr);
   }
   tbody.append(fragment);
@@ -127,7 +129,7 @@ function renderChart() {
   const height = Math.max(Math.round(svg.clientHeight), 250);
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
   svg.replaceChildren();
-  const padding = { left: 43, right: 18, top: 20, bottom: 33 };
+  const padding = { left: 68, right: 18, top: 20, bottom: 33 };
   const plotWidth = width - padding.left - padding.right;
   const plotHeight = height - padding.top - padding.bottom;
   const isSpread = state.view === 'spread';
@@ -189,8 +191,88 @@ function renderChart() {
   $('chart-cursor').max = rows.length - 1;
   $('chart-cursor').value = cursorIndex;
   $('chart-cursor').setAttribute('aria-valuetext', cursorDescription(selected));
+  renderFundingHistoryChart();
   hideTooltip();
-  if (document.activeElement === $('chart-cursor')) showTooltip(cursorIndex);
+  if ([$('chart-cursor'), $('funding-history-cursor')].includes(document.activeElement)) showTooltip(cursorIndex);
+}
+
+function renderFundingHistoryChart() {
+  if (!state.chart || !state.visible.length) return;
+  const svg = $('funding-history-chart');
+  const records = state.visible.map(row => state.fundingDaily.get(row.date)).filter(Boolean);
+  const empty = $('funding-history-empty');
+  svg.replaceChildren(); state.fundingChart = null;
+  $('funding-history-tooltip').hidden = true;
+  const mode = state.fundingHistoryMode;
+  $('funding-history-status').textContent = state.fundingSnapshot ? `${mode === 'live' ? '历史费率已同步' : mode === 'stale' ? '历史费率更新失败，保留数据' : '历史费率备用快照'} · ${beijingTime(state.fundingSnapshot.metadata.fetchedAt)} 北京时间。不足 24 个样本的日期按已有共同结算小时求均值，不补零。` : mode === 'error' ? '历史资金费率暂不可用；价格图表与当前预估仍可使用。可点击顶部刷新数据重试。' : '正在载入已结算资金费率。';
+  $('funding-history-count').textContent = records.length ? `${records.length} 天 · ${records.reduce((sum, row) => sum + row.count, 0).toLocaleString('zh-CN')} 个共同小时` : '';
+  if (records.length) svg.removeAttribute('hidden'); else svg.setAttribute('hidden', '');
+  empty.hidden = Boolean(records.length);
+  $('funding-history-cursor').disabled = !records.length;
+  if (!records.length) { empty.textContent = mode === 'loading' ? '正在读取历史结算费率…' : mode === 'error' ? '历史资金费率暂不可用' : '所选区间暂无共同结算数据'; return; }
+  const { width, x, padding } = state.chart;
+  const height = Math.max(svg.clientHeight, 185);
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  const top = 15, bottom = 29;
+  const maxAbs = Math.max(...records.map(row => Math.abs(row.shortRate)), 0.000001) * 1.18;
+  const axisDigits = Math.min(6, Math.max(3, 1 - Math.floor(Math.log10(maxAbs * 100))));
+  const y = rate => top + (maxAbs - rate) / (2 * maxAbs) * (height - top - bottom);
+  svg.append(svgElement('title', {}, `历史日均小时资金费率，${state.visible[0].date}至${state.visible.at(-1).date}`));
+  svg.append(svgElement('desc', {}, '两腿等预言机美元名义，按两腿总敞口计算。做多为多布伦特空WTI，做空相反。正值收款，负值付款。每日数值及样本数见下方明细表。'));
+  for (let i = -2; i <= 2; i++) {
+    const value = maxAbs * i / 2;
+    svg.append(svgElement('line', { x1: padding.left, x2: width - padding.right, y1: y(value), y2: y(value), stroke: i === 0 ? '#66725e' : '#2b352c', 'stroke-dasharray': i === 0 ? 'none' : '3 5' }));
+    svg.append(svgElement('text', { x: padding.left - 9, y: y(value) + 4, 'text-anchor': 'end' }, `${(value * 100).toFixed(axisDigits)}%`));
+  }
+  const tickCount = width < 500 ? 4 : 7;
+  const indices = [...new Set(Array.from({ length: Math.min(tickCount, state.visible.length) }, (_, i) => Math.round(i * (state.visible.length - 1) / (Math.min(tickCount, state.visible.length) - 1 || 1))))];
+  indices.forEach((index, i) => { const date = state.visible[index].date; svg.append(svgElement('text', { x: x(date), y: height - 6, 'text-anchor': i === 0 ? 'start' : i === indices.length - 1 ? 'end' : 'middle' }, `${Number(date.slice(5, 7))}/${Number(date.slice(8))}`)); });
+  const series = [{ field: 'longRate', color: '#99bdf2', dash: 'none' }, { field: 'shortRate', color: '#e9b288', dash: '5 3' }];
+  for (const item of series) {
+    let path = '', previous = null;
+    for (const row of state.visible) {
+      const point = state.fundingDaily.get(row.date);
+      if (!point) { previous = null; continue; }
+      const connected = previous && Date.parse(point.date) - Date.parse(previous.date) === DAY;
+      path += `${connected ? 'L' : 'M'}${x(point.date).toFixed(3)},${y(point[item.field]).toFixed(3)} `;
+      if (!connected || point.count < 24) svg.append(svgElement('circle', { cx: x(point.date), cy: y(point[item.field]), r: 2.5, fill: '#181e1b', stroke: item.color, 'stroke-width': 1.5 }));
+      previous = point;
+    }
+    svg.append(svgElement('path', { d: path, fill: 'none', stroke: item.color, 'stroke-width': 1.8, 'stroke-linejoin': 'round', 'stroke-dasharray': item.dash }));
+  }
+  const crosshair = svgElement('g', { visibility: 'hidden', 'aria-hidden': 'true' });
+  const guide = svgElement('line', { y1: top, y2: height - bottom, stroke: '#65765c', 'stroke-dasharray': '3 4' });
+  crosshair.append(guide);
+  const dots = series.map(item => { const dot = svgElement('circle', { r: 4, fill: item.color, stroke: '#181e1b', 'stroke-width': 2 }); crosshair.append(dot); return { field: item.field, node: dot }; });
+  svg.append(crosshair);
+  state.fundingChart = { width, x, y, crosshair, guide, dots };
+  $('funding-history-cursor').max = state.visible.length - 1;
+  const index = Math.max(0, state.visible.findIndex(row => row.date === state.selectedDate));
+  $('funding-history-cursor').value = index;
+  $('funding-history-cursor').setAttribute('aria-valuetext', historicalFundingDescription(state.visible[index].date));
+  if ([$('chart-cursor'), $('funding-history-cursor')].includes(document.activeElement)) showTooltip(index);
+}
+
+function historicalFundingDescription(date) {
+  const row = state.fundingDaily.get(date);
+  return row ? `${date}，做多价差 ${percent(row.longRate)}，做空价差 ${percent(row.shortRate)}，日均小时费率，等名义总敞口，${row.count}个结算小时样本` : `${date}，没有共同历史资金费率样本`;
+}
+
+function showHistoricalFundingTooltip(date) {
+  const chart = state.fundingChart;
+  if (!chart) return;
+  const row = state.fundingDaily.get(date), px = chart.x(date);
+  const tooltip = $('funding-history-tooltip');
+  chart.crosshair.setAttribute('visibility', row ? 'visible' : 'hidden');
+  if (row) {
+    chart.guide.setAttribute('x1', px); chart.guide.setAttribute('x2', px);
+    for (const dot of chart.dots) { dot.node.setAttribute('cx', px); dot.node.setAttribute('cy', chart.y(row[dot.field])); }
+  }
+  tooltip.innerHTML = `<div class="tooltip-date">${displayDate(date)} · UTC 结算日</div>${row ? `<div class="tooltip-row funding-history-tooltip-long"><span>做多价差</span><strong>${percent(row.longRate)}</strong></div><div class="tooltip-row funding-history-tooltip-short"><span>做空价差</span><strong>${percent(row.shortRate)}</strong></div><div class="tooltip-date">日均小时率 · ${row.count} / 24 小时样本</div>` : '<div>当日无共同结算样本</div>'}`;
+  tooltip.hidden = false;
+  tooltip.style.left = `${Math.max(0, Math.min(px + 14, chart.width - tooltip.offsetWidth))}px`;
+  tooltip.style.top = '29px';
+  $('funding-history-cursor').setAttribute('aria-valuetext', historicalFundingDescription(date));
 }
 
 function cursorDescription(row) {
@@ -211,11 +293,16 @@ function showTooltip(index) {
   tooltip.style.left = `${Math.max(0, Math.min(px + 14, chart.width - tooltip.offsetWidth))}px`;
   tooltip.style.top = '38px';
   $('chart-cursor').setAttribute('aria-valuetext', cursorDescription(row));
+  $('chart-cursor').value = index;
+  $('funding-history-cursor').value = index;
+  showHistoricalFundingTooltip(row.date);
 }
 
 function hideTooltip() {
   $('chart-tooltip').hidden = true;
   state.chart?.crosshair.setAttribute('visibility', 'hidden');
+  $('funding-history-tooltip').hidden = true;
+  state.fundingChart?.crosshair.setAttribute('visibility', 'hidden');
 }
 
 function render() {
@@ -271,6 +358,35 @@ async function loadData() {
   await refreshData(true);
 }
 
+function applyFundingSnapshot(snapshot, mode) {
+  if (mode === 'snapshot' && state.fundingSnapshot) return;
+  const validated = createFundingSnapshot(snapshot.data, snapshot.metadata.fetchedAt);
+  if (validated.metadata.pairedObservationRows !== snapshot.metadata.pairedObservationRows || validated.metadata.firstSettlementTime !== snapshot.metadata.firstSettlementTime || validated.metadata.lastSettlementTime !== snapshot.metadata.lastSettlementTime) throw new Error('Funding metadata mismatch');
+  state.fundingSnapshot = validated; state.fundingHistoryMode = mode;
+  state.fundingDaily = new Map(dailyFundingRates(validated.data).map(row => [row.date, row]));
+  if (state.visible.length) { renderFundingHistoryChart(); renderTable(); }
+}
+
+async function refreshHistoricalFunding() {
+  if (state.fundingRefreshing) return;
+  state.fundingRefreshing = true;
+  try { applyFundingSnapshot(await fetchFundingSnapshot(state.fundingSnapshot), 'live'); }
+  catch (error) {
+    console.warn('Unable to update settled funding history:', error);
+    state.fundingHistoryMode = state.fundingSnapshot ? 'stale' : 'error';
+    renderFundingHistoryChart();
+  } finally { state.fundingRefreshing = false; }
+}
+
+async function loadHistoricalFunding() {
+  try {
+    const response = await fetch('./data/hyperliquid-funding-2026.json');
+    if (!response.ok) throw new Error(`Funding snapshot HTTP ${response.status}`);
+    applyFundingSnapshot(await response.json(), 'snapshot');
+  } catch (error) { console.warn('Local funding snapshot unavailable:', error); }
+  await refreshHistoricalFunding();
+}
+
 document.querySelectorAll('[data-range]').forEach(button => button.addEventListener('click', () => { state.range = button.dataset.range; render(); }));
 const tabs = [...document.querySelectorAll('[data-view]')];
 for (const button of tabs) {
@@ -282,15 +398,23 @@ for (const button of tabs) {
     state.view = next.dataset.view; render(); next.focus();
   });
 }
-$('main-chart').addEventListener('pointermove', event => {
+function handleChartPointer(event) {
   if (!state.chart) return;
-  const rect = $('main-chart').getBoundingClientRect();
+  const rect = event.currentTarget.getBoundingClientRect();
   const px = (event.clientX - rect.left) * state.chart.width / rect.width;
   const target = state.chart.start + (px - state.chart.padding.left) / state.chart.plotWidth * (state.chart.end - state.chart.start);
   let index = 0;
   state.visible.forEach((row, i) => { if (Math.abs(Date.parse(row.date) - target) < Math.abs(Date.parse(state.visible[index].date) - target)) index = i; });
   $('chart-cursor').value = index; showTooltip(index);
-});
+}
+$('main-chart').addEventListener('pointermove', handleChartPointer);
+$('funding-history-chart').addEventListener('pointermove', handleChartPointer);
+$('funding-history-chart').addEventListener('pointerleave', hideTooltip);
+$('funding-history-chart').addEventListener('pointerdown', event => { if (event.pointerType === 'touch') $('funding-history-chart').dispatchEvent(new PointerEvent('pointermove', { clientX: event.clientX, clientY: event.clientY })); });
+$('funding-history-cursor').addEventListener('input', event => showTooltip(Number(event.target.value)));
+$('funding-history-cursor').addEventListener('focus', event => showTooltip(Number(event.target.value)));
+$('funding-history-cursor').addEventListener('blur', hideTooltip);
+$('funding-history-cursor').addEventListener('keydown', event => { if (event.key === 'Escape') hideTooltip(); });
 $('main-chart').addEventListener('pointerleave', hideTooltip);
 $('main-chart').addEventListener('pointerdown', event => { if (event.pointerType === 'touch') $('main-chart').dispatchEvent(new PointerEvent('pointermove', { clientX: event.clientX, clientY: event.clientY })); });
 $('chart-cursor').addEventListener('input', event => showTooltip(Number(event.target.value)));
@@ -298,12 +422,14 @@ $('chart-cursor').addEventListener('focus', event => showTooltip(Number(event.ta
 $('chart-cursor').addEventListener('blur', hideTooltip);
 $('chart-cursor').addEventListener('keydown', event => { if (event.key === 'Escape') hideTooltip(); });
 $('retry').addEventListener('click', () => refreshData(true));
-$('refresh-data').addEventListener('click', () => refreshData(true));
+$('refresh-data').addEventListener('click', () => { refreshData(true); refreshHistoricalFunding(); });
 document.querySelectorAll('[data-basis]').forEach(button => button.addEventListener('click', () => { state.basis = button.dataset.basis; renderFunding(); }));
 function refreshWhenVisible() {
   if (document.hidden || state.refreshing) return;
   const historyAge = state.metadata ? Date.now() - Date.parse(state.metadata.fetchedAt) : Infinity;
   refreshData(historyAge > 5 * 60_000);
+  const fundingAge = state.fundingSnapshot ? Date.now() - Date.parse(state.fundingSnapshot.metadata.fetchedAt) : Infinity;
+  if (fundingAge > 5 * 60_000) refreshHistoricalFunding();
 }
 const refreshTimer = setInterval(refreshWhenVisible, 60_000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden && (!state.market || Date.now() - Date.parse(state.market.fetchedAt) > 60_000)) refreshWhenVisible(); });
@@ -333,3 +459,4 @@ if (document.modelContext?.registerTool) {
   window.addEventListener('pagehide', event => { if (!event.persisted) lifecycle.abort(); });
 }
 loadData();
+loadHistoricalFunding();
