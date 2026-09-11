@@ -30,14 +30,26 @@ export function ruleFingerprint(rule) {
   return JSON.stringify([rule.metric, rule.operator, rule.threshold, rule.hysteresis, rule.enabled]);
 }
 
+function decimalDifference(left, right) {
+  const parts = value => {
+    const [mantissa, exponent = '0'] = String(value).split('e');
+    const [whole, fraction = ''] = mantissa.split('.');
+    return { integer: BigInt(whole + fraction), scale: fraction.length - Number(exponent) };
+  };
+  const a = parts(left), b = parts(right), scale = Math.max(0, a.scale, b.scale);
+  const difference = a.integer * 10n ** BigInt(scale - a.scale) - b.integer * 10n ** BigInt(scale - b.scale);
+  const digits = (difference < 0n ? -difference : difference).toString().padStart(scale + 1, '0');
+  return Number((difference < 0n ? '-' : '') + (scale ? `${digits.slice(0, -scale)}.${digits.slice(-scale)}` : digits));
+}
+
 export function marketValues(market, now = Date.now(), maxAge = 90_000) {
   const timestamp = Date.parse(market?.fetchedAt);
   if (!Number.isFinite(timestamp) || now - timestamp > maxAge || timestamp - now > 5000) throw new Error('行情已过期，暂停阈值判断');
   const brent = market?.brent?.markPx, wti = market?.wti?.markPx;
   if (![brent, wti].every(value => typeof value === 'number' && Number.isFinite(value) && value > 0)) throw new Error('行情价格无效，暂停阈值判断');
-  // Quotes have fewer significant digits; remove cancellation noise such as
-  // 75.3 - 75 = 0.29999999999999716 before inclusive threshold comparisons.
-  return { spread: Number((brent - wti).toPrecision(12)), brent, wti };
+  // Subtract decimal quotes before converting the spread back to Number so
+  // tiny quoted spreads remain equal to the same user-entered decimal threshold.
+  return { spread: decimalDifference(brent, wti), brent, wti };
 }
 
 // One notification per threshold episode. Cooldown also spans separate episodes.

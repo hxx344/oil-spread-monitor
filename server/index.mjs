@@ -37,7 +37,7 @@ async function main() {
     try { await new Promise(resolve => server.close(resolve)); await monitor.stop(); await store.release(); clearTimeout(timer); }
     catch { process.exitCode = 1; }
   }
-  process.once('SIGTERM', shutdown); process.once('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 }
 // Native Linux starts share the same kernel lock as Docker and systemd.
 // Kernel locks release on crashes, so restart policies can recover unattended.
@@ -45,7 +45,7 @@ if (process.platform === 'linux' && process.env.OIL_EXTERNAL_LOCK !== '1') {
   const directory = path.resolve(process.env.DATA_DIR || './data');
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const child = spawn('flock', ['--no-fork', '--nonblock', path.join(directory, 'instance.lock'), process.execPath, fileURLToPath(import.meta.url)], { stdio: 'inherit', env: { ...process.env, DATA_DIR: directory, OIL_EXTERNAL_LOCK: '1' } });
-  for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => child.kill(signal));
+  for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => child.kill(signal));
   child.once('error', () => { console.error('无法启动 Linux 进程锁，请安装 util-linux（flock）'); process.exitCode = 1; });
   child.once('exit', code => { process.exitCode = code ?? 1; });
 } else main().catch(error => { console.error(error.message); process.exitCode = 1; });

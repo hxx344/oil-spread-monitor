@@ -78,6 +78,11 @@ test('decimal price subtraction and hysteresis equality do not miss or premature
   const values = marketValues(market, now);
   assert.equal(values.spread, 0.3);
   assert.equal(evaluateRule(rule({ threshold: 0.3 }), {}, values.spread, now).shouldSend, true);
+  for (const [brent, wti, spread] of [[32.001, 32, 0.001], [32, 32.001, -0.001], [1.000001e-7, 1e-7, 1e-13], [1e21, 9e20, 1e20]]) {
+    const exact = marketValues({ ...market, brent: { markPx: brent }, wti: { markPx: wti } }, now);
+    assert.equal(exact.spread, spread);
+    assert.equal(evaluateRule(rule({ threshold: spread }), {}, exact.spread, now).shouldSend, true);
+  }
   assert.equal(evaluateRule(rule({ operator: 'lte', threshold: 0.3, hysteresis: 0.6 }), { active: true, alerted: true }, 0.9, now).state.active, true);
 });
 
