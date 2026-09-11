@@ -1,0 +1,26 @@
+[Unit]
+Description=Oil spread monitor and Feishu alerts
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=oil-monitor
+Group=oil-monitor
+WorkingDirectory=/opt/oil-spread-monitor
+EnvironmentFile=/opt/oil-spread-monitor/.env
+Environment=DATA_DIR=/var/lib/oil-spread-monitor
+Environment=OIL_EXTERNAL_LOCK=1
+StateDirectory=oil-spread-monitor
+ExecStart=/usr/bin/flock --no-fork --nonblock /var/lib/oil-spread-monitor/instance.lock /usr/bin/env DATA_DIR=/var/lib/oil-spread-monitor OIL_EXTERNAL_LOCK=1 /usr/bin/node /opt/oil-spread-monitor/server/index.mjs
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

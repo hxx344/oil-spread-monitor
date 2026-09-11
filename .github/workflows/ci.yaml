@@ -1,0 +1,50 @@
+name: Validate Linux deployment
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      ADMIN_TOKEN: ci-only-token-for-isolated-local-container
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+      - run: npm test
+      - name: Build Linux image
+        run: |
+          printf 'ADMIN_TOKEN=%s\n' "$ADMIN_TOKEN" > .env
+          docker compose -p oil-ci config --quiet
+          docker compose -p oil-ci build
+      - name: Verify HTTP, configuration persistence, and crash restart
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -p oil-ci up -d
+          ready() {
+            for attempt in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:3000/api/health; then return 0; fi
+              sleep 2
+            done
+            docker compose -p oil-ci logs
+            return 1
+          }
+          ready
+          curl -fsS http://127.0.0.1:3000/ > /tmp/oil-index.html
+          curl -fsS http://127.0.0.1:3000/alerts.mjs > /dev/null
+          curl -fsS -X PUT http://127.0.0.1:3000/api/config -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' --data '{"revision":0,"config":{"enabled":false,"rules":[{"id":"persist","label":"Linux persistence","metric":"spread","operator":"gte","threshold":7,"cooldownMinutes":30,"hysteresis":0.2,"enabled":true}]}}' > /dev/null
+          docker compose -p oil-ci kill -s SIGKILL oil-monitor
+          docker compose -p oil-ci start oil-monitor
+          ready
+          curl -fsS http://127.0.0.1:3000/api/config -H "Authorization: Bearer $ADMIN_TOKEN" | node --input-type=module -e "let s='';for await(const c of process.stdin)s+=c;const d=JSON.parse(s);if(d.revision!==1||d.config.rules[0].threshold!==7)process.exit(1)"
+      - name: Container logs
+        if: always()
+        run: docker compose -p oil-ci logs || true
+      - name: Clean up
+        if: always()
+        run: docker compose -p oil-ci down -v || true
