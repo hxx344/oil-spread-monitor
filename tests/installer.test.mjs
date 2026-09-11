@@ -37,13 +37,17 @@ test('installer syntax and help work both from a file and a curl-style stdin pip
 
 test('fresh unattended install generates a secret and writes valid defaults without logging credentials', { skip: !available }, async () => {
   await sandbox(async directory => {
-    const result = run(directory, 'configure');
+    const result = run(directory, 'PORT_OPTION=03000; configure');
     assert.equal(result.status, 0, result.stderr);
     const config = values(await readFile(path.join(directory, '.env'), 'utf8'));
     assert.match(config.ADMIN_TOKEN, /^[a-f0-9]{64}$/);
     assert.equal(config.HTTP_PORT, '3000'); assert.equal(config.BIND_ADDRESS, '0.0.0.0');
     assert.equal(config.FEISHU_WEBHOOK_URL, ''); assert.equal(config.OIL_DOMAIN, '');
     assert.ok(!result.stdout.includes(config.ADMIN_TOKEN)); assert.ok(!result.stderr.includes(config.ADMIN_TOKEN));
+    const before = await readFile(path.join(directory, '.env'), 'utf8');
+    const repeated = run(directory, 'PORT_OPTION=03000; configure');
+    assert.equal(repeated.status, 0, repeated.stderr);
+    assert.equal(await readFile(path.join(directory, '.env'), 'utf8'), before);
   });
 });
 

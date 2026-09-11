@@ -214,6 +214,11 @@ validate_access() {
 configure() {
   [[ ! -L $INSTALL_DIR/.env ]] || die '.env 不能是符号链接'
   local admin_token=${ADMIN_TOKEN:-} webhook=${FEISHU_WEBHOOK_URL:-} secret=${FEISHU_WEBHOOK_SECRET:-} temp
+  if [[ -n $PORT_OPTION ]]; then
+    [[ $PORT_OPTION =~ ^[0-9]{1,5}$ ]] || die 'HTTP 端口需要 1–65535 的整数'
+    ((10#$PORT_OPTION >= 1 && 10#$PORT_OPTION <= 65535)) || die 'HTTP 端口需要 1–65535 的整数'
+    PORT_OPTION=$((10#$PORT_OPTION))
+  fi
   if [[ ! -e $INSTALL_DIR/.env ]]; then
     APP_DOMAIN=${DOMAIN_OPTION:-${OIL_DOMAIN:-}}
     if [[ -z $APP_DOMAIN ]]; then ask APP_DOMAIN '访问域名（留空使用 IP:3000）：'; fi
@@ -247,10 +252,10 @@ configure() {
     APP_DOMAIN=$(read_setting OIL_DOMAIN)
     APP_PORT=$(read_setting HTTP_PORT); APP_PORT=${APP_PORT:-3000}
     APP_BIND=$(read_setting BIND_ADDRESS); APP_BIND=${APP_BIND:-127.0.0.1}
+    validate_access
     [[ -z $DOMAIN_OPTION || ${DOMAIN_OPTION,,} == "${APP_DOMAIN,,}" ]] || die '已有域名配置与参数不一致，请直接修改 .env 后重新执行'
     [[ -z $PORT_OPTION || $PORT_OPTION == "$APP_PORT" ]] || die '已有端口配置与参数不一致，请直接修改 .env 后重新执行'
     [[ -z $BIND_OPTION || $BIND_OPTION == "$APP_BIND" ]] || die '已有绑定地址与参数不一致，请直接修改 .env 后重新执行'
-    validate_access
     admin_token=$(read_setting ADMIN_TOKEN)
     if [[ -z $admin_token ]]; then
       admin_token=$(random_token); NEW_TOKEN=1
