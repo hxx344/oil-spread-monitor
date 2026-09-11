@@ -164,7 +164,7 @@ install_source() {
     actual=$(repo_git remote get-url origin)
     [[ $actual == "$SOURCE_REPOSITORY" || $actual == "${SOURCE_REPOSITORY%.git}" ]] || die '安装目录属于其他仓库，未修改该目录'
     [[ $(repo_git rev-parse --show-toplevel) == "$INSTALL_DIR" ]] || die '安装目录不是独立仓库根目录'
-    repo_git diff --quiet && repo_git diff --cached --quiet || die '源码有未提交修改，请先保存；安装器不会覆盖修改'
+    if ! repo_git diff --quiet || ! repo_git diff --cached --quiet; then die '源码有未提交修改，请先保存；安装器不会覆盖修改'; fi
     branch=$(repo_git symbolic-ref --short HEAD) || die '安装目录处于 detached HEAD，请先切回 main'
     [[ $branch == main ]] || die '安装目录不在 main 分支，请先切回 main'
     log '获取最新代码，保留现有配置和数据'
@@ -202,7 +202,8 @@ env_line() {
 random_token() { od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; }
 validate_access() {
   APP_DOMAIN=${APP_DOMAIN,,}
-  [[ $APP_PORT =~ ^[0-9]{1,5}$ ]] && ((10#$APP_PORT >= 1 && 10#$APP_PORT <= 65535)) || die 'HTTP 端口需要 1–65535 的整数'
+  [[ $APP_PORT =~ ^[0-9]{1,5}$ ]] || die 'HTTP 端口需要 1–65535 的整数'
+  ((10#$APP_PORT >= 1 && 10#$APP_PORT <= 65535)) || die 'HTTP 端口需要 1–65535 的整数'
   APP_PORT=$((10#$APP_PORT))
   [[ $APP_BIND == 0.0.0.0 || $APP_BIND == 127.0.0.1 ]] || die '绑定地址请使用 0.0.0.0 或 127.0.0.1'
   if [[ -n $APP_DOMAIN ]]; then
@@ -246,7 +247,7 @@ configure() {
     APP_DOMAIN=$(read_setting OIL_DOMAIN)
     APP_PORT=$(read_setting HTTP_PORT); APP_PORT=${APP_PORT:-3000}
     APP_BIND=$(read_setting BIND_ADDRESS); APP_BIND=${APP_BIND:-127.0.0.1}
-    [[ -z $DOMAIN_OPTION || ${DOMAIN_OPTION,,} == ${APP_DOMAIN,,} ]] || die '已有域名配置与参数不一致，请直接修改 .env 后重新执行'
+    [[ -z $DOMAIN_OPTION || ${DOMAIN_OPTION,,} == "${APP_DOMAIN,,}" ]] || die '已有域名配置与参数不一致，请直接修改 .env 后重新执行'
     [[ -z $PORT_OPTION || $PORT_OPTION == "$APP_PORT" ]] || die '已有端口配置与参数不一致，请直接修改 .env 后重新执行'
     [[ -z $BIND_OPTION || $BIND_OPTION == "$APP_BIND" ]] || die '已有绑定地址与参数不一致，请直接修改 .env 后重新执行'
     validate_access
@@ -277,10 +278,10 @@ deploy() {
   log '构建并启动监控服务'
   docker_local compose "${compose_args[@]}" config --quiet
   docker_local compose "${compose_args[@]}" up -d --build --remove-orphans
-  local attempt container healthy=0
+  local _attempt container healthy=0
   container=$(docker_local compose "${compose_args[@]}" ps -q oil-monitor)
   [[ -n $container ]] || die '监控容器未启动，请检查 Docker Compose 输出'
-  for attempt in {1..60}; do
+  for _attempt in {1..60}; do
     if timeout 8 docker --context default exec "$container" node -e "fetch('http://127.0.0.1:3000/api/health',{signal:AbortSignal.timeout(5000)}).then(async r=>{if(!r.ok||!(await r.json()).ok)process.exit(1)}).catch(()=>process.exit(1))" >/dev/null 2>&1; then healthy=1; break; fi
     sleep 2
   done
@@ -289,9 +290,9 @@ deploy() {
   if [[ -n $APP_DOMAIN ]]; then
     local proxy https_ready=0 response
     proxy=$(docker_local compose "${compose_args[@]}" ps -q caddy)
-    [[ -n $proxy ]] && docker_local exec "$proxy" caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 || die 'HTTPS 代理启动失败，请检查 Caddy 日志'
+    if [[ -z $proxy ]] || ! docker_local exec "$proxy" caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1; then die 'HTTPS 代理启动失败，请检查 Caddy 日志'; fi
     log '等待 HTTPS 证书和域名访问就绪'
-    for attempt in {1..12}; do
+    for _attempt in {1..12}; do
       response=$(curl --fail --silent --show-error --connect-timeout 3 --max-time 5 "https://$APP_DOMAIN/api/health" 2>/dev/null || true)
       if [[ $response == *'"service":"oil-spread-monitor"'* && $response == *'"ok":true'* ]]; then https_ready=1; break; fi
       sleep 5
