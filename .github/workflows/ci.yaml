@@ -5,6 +5,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       ADMIN_TOKEN: ci-only-token-for-isolated-local-container
     steps:
@@ -16,6 +17,8 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run check
       - run: npm test
+      - name: Check installer shell
+        run: shellcheck -x deploy/install.sh
       - name: Build Linux image
         run: |
           printf 'ADMIN_TOKEN=%s\n' "$ADMIN_TOKEN" > .env
@@ -42,9 +45,39 @@ jobs:
           docker compose -p oil-ci start oil-monitor
           ready
           curl -fsS http://127.0.0.1:3000/api/config -H "Authorization: Bearer $ADMIN_TOKEN" | node --input-type=module -e "let s='';for await(const c of process.stdin)s+=c;const d=JSON.parse(s);if(d.revision!==1||d.config.rules[0].threshold!==7)process.exit(1)"
+      - name: Validate HTTPS configuration
+        run: |
+          OIL_DOMAIN=oil.example.test docker compose -p oil-ci -f compose.yaml -f compose.https.yaml config --quiet
+          docker run --rm -e OIL_DOMAIN=oil.example.test -v "$PWD/deploy/Caddyfile.docker:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile
+      - name: Verify one-command install, upgrade, and preserved settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --no-hardlinks "$GITHUB_WORKSPACE" "$RUNNER_TEMP/oil-installer-source"
+          git -C "$RUNNER_TEMP/oil-installer-source" switch -C main "$GITHUB_SHA"
+          cat deploy/install.sh | sudo --preserve-env=ADMIN_TOKEN bash -s -- --source "$RUNNER_TEMP/oil-installer-source" --dir "$RUNNER_TEMP/oil-installer" --port 3001 --bind 127.0.0.1 --non-interactive --skip-docker-install
+          sudo sha256sum "$RUNNER_TEMP/oil-installer/.env" > "$RUNNER_TEMP/oil-env.sha"
+          curl -fsS -X PUT http://127.0.0.1:3001/api/config -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' --data '{"revision":0,"config":{"enabled":false,"rules":[{"id":"installer-persist","label":"Installer persistence","metric":"spread","operator":"gte","threshold":9,"cooldownMinutes":30,"hysteresis":0.2,"enabled":true}]}}' > /dev/null
+          printf 'upgrade fixture\n' > "$RUNNER_TEMP/oil-installer-source/.installer-ci-version"
+          git -C "$RUNNER_TEMP/oil-installer-source" add .installer-ci-version
+          git -C "$RUNNER_TEMP/oil-installer-source" -c user.name=CI -c user.email=ci@example.test commit -m 'Installer upgrade fixture'
+          HTTP_PORT=3999 BIND_ADDRESS=0.0.0.0 COMPOSE_PROJECT_NAME=wrong-project sudo --preserve-env=ADMIN_TOKEN,HTTP_PORT,BIND_ADDRESS,COMPOSE_PROJECT_NAME bash deploy/install.sh --source "$RUNNER_TEMP/oil-installer-source" --dir "$RUNNER_TEMP/oil-installer" --non-interactive --skip-docker-install
+          sudo sha256sum -c "$RUNNER_TEMP/oil-env.sha"
+          sudo test -f "$RUNNER_TEMP/oil-installer/.installer-ci-version"
+          curl -fsS http://127.0.0.1:3001/api/config -H "Authorization: Bearer $ADMIN_TOKEN" | node --input-type=module -e "let s='';for await(const c of process.stdin)s+=c;const d=JSON.parse(s);if(d.revision!==1||d.config.rules[0].threshold!==9)process.exit(1)"
+          printf '\nlocal uncommitted content\n' | sudo tee -a "$RUNNER_TEMP/oil-installer/README.md" > /dev/null
+          if sudo bash deploy/install.sh --source "$RUNNER_TEMP/oil-installer-source" --dir "$RUNNER_TEMP/oil-installer" --non-interactive --skip-docker-install; then
+            echo 'Installer unexpectedly accepted dirty source'
+            exit 1
+          fi
+          sudo grep -q 'local uncommitted content' "$RUNNER_TEMP/oil-installer/README.md"
       - name: Container logs
         if: always()
         run: docker compose -p oil-ci logs || true
       - name: Clean up
         if: always()
-        run: docker compose -p oil-ci down -v || true
+        run: |
+          docker compose -p oil-ci down -v || true
+          if sudo test -f "$RUNNER_TEMP/oil-installer/.env"; then
+            sudo docker --context default compose --project-name oil-installer --project-directory "$RUNNER_TEMP/oil-installer" --env-file "$RUNNER_TEMP/oil-installer/.env" -f "$RUNNER_TEMP/oil-installer/compose.yaml" down -v || true
+          fi

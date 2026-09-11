@@ -1,0 +1,3 @@
+{$OIL_DOMAIN} {
+    reverse_proxy oil-monitor:3000
+}

@@ -9,9 +9,43 @@ Hyperliquid / XYZ 原油永续合约看板，加上可在 Linux 持续运行的�
 
 GitHub：[hxx344/oil-spread-monitor](https://github.com/hxx344/oil-spread-monitor)。Linux 部署使用整个仓库；`dist` 单独静态托管只提供看板，不运行后台告警。
 
-## Linux 快速部署（Docker Compose）
+## Linux 一键部署
 
-需要已安装 Docker Engine 和 Compose 插件，并能访问 Hyperliquid 与飞书公网 API。仓库为私有，克隆时使用有权限的 GitHub 账号。
+在 Linux 服务器终端执行一条命令：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hxx344/oil-spread-monitor/main/deploy/install.sh | sudo bash
+```
+
+使用 root 账号且未安装 sudo 时，将最后的 `sudo bash` 换成 `bash`。脚本会下载公开仓库、自动安装缺少的 Docker Engine／Compose、生成管理口令、配置并启动服务，最后验证运行状态。
+
+首次执行时可填写域名、飞书 Webhook 和签名密钥；也可回车跳过。管理口令会显示在交互终端，并保存在 `/opt/oil-spread-monitor/.env`。飞书配置留空时看板可用，告警暂不发送；配置机器人后在前端启用梯度。无需提前安装 Node.js，也无需手动克隆或编辑配置文件。
+
+- 无域名：默认访问 `http://服务器IP:3000`，云服务器需放行 TCP 3000；适合内网使用。
+- 有域名：脚本自动启动 Caddy、申请 HTTPS 证书并检查域名访问；提前将域名解析到服务器，放行 TCP 80/443。公网使用建议采用此方式。
+- 自动安装依赖支持 **Ubuntu 22.04 / 24.04 / 26.04、Debian 12 / 13**，架构为 x86_64 或 ARM64；其他 Linux 可先安装 Docker Compose、git、curl、flock。已有可用 Docker 会直接复用，不卸载现有容器组件。
+
+也可以直接指定域名或端口：
+
+```bash
+# 自动 HTTPS
+curl -fsSL https://raw.githubusercontent.com/hxx344/oil-spread-monitor/main/deploy/install.sh | sudo bash -s -- --domain oil.example.com
+
+# 使用 8080 端口，不进行交互提问
+curl -fsSL https://raw.githubusercontent.com/hxx344/oil-spread-monitor/main/deploy/install.sh | sudo bash -s -- --port 8080 --non-interactive
+```
+
+首次安装支持环境变量 `FEISHU_WEBHOOK_URL`、`FEISHU_WEBHOOK_SECRET`、`ADMIN_TOKEN` 以便自动化配置。无人值守执行不会把口令输出到日志，可在服务器 `.env` 文件中查看。`--dir` 可修改安装目录，`--bind 127.0.0.1` 可限制为本机访问，`--skip-docker-install` 可禁止安装 Docker，完整选项见 `bash deploy/install.sh --help`。
+
+**升级只需再次执行同一命令**。安装器保留已有 `.env`、管理口令、Compose 项目名和数据卷，仅快进更新 `main` 分支；本地源码有未提交修改或分叉时会停止，不覆盖修改。变更已有端口或域名时直接修改 `.env`，然后重复安装命令。启用域名时同时设置 `OIL_DOMAIN=oil.example.com`、`PUBLIC_ORIGIN=https://oil.example.com` 和 `BIND_ADDRESS=127.0.0.1`。
+
+源码下载、构建或健康检查失败时会返回错误，保留配置和数据，修复后可重试；构建新版本成功之前不会停止旧容器。安装器不会自动回滚已启动但健康检查失败的新版本。带域名的部署若 DNS 或证书尚未就绪，会明确报告 HTTPS 检查失败。
+
+安装器基于 [Docker Ubuntu 官方安装方式](https://docs.docker.com/engine/install/ubuntu/) 和 [Debian 官方安装方式](https://docs.docker.com/engine/install/debian/)。所有源码和脚本都可在本公开仓库查看。
+
+## 手动部署（Docker Compose）
+
+适用于已有 Docker Engine 和 Compose 插件，希望自行管理配置的环境。服务器需要能访问 GitHub、镜像仓库、Hyperliquid 与飞书公网 API。
 
 ```bash
 git clone https://github.com/hxx344/oil-spread-monitor.git
@@ -76,10 +110,14 @@ ssh -L 3000:127.0.0.1:3000 user@your-linux-server
 | `HOST` / `PORT` | Node 监听地址／端口，默认 `0.0.0.0:3000` |
 | `PUBLIC_ORIGIN` | 可选，公开访问的完整来源，如 `https://oil.example.com`，不带尾斜杠 |
 | `BIND_ADDRESS` / `HTTP_PORT` | Compose 宿主机绑定，默认 `127.0.0.1` / `3000` |
+| `OIL_DOMAIN` | 可选，一键部署使用的 HTTPS 域名；配合 `compose.https.yaml` |
+| `COMPOSE_PROJECT_NAME` | 可选，固定项目与数据卷身份；一键安装会保存，普通 Compose 默认使用目录名 |
 
 管理口令仅保留在当前页面内存，刷新或锁定后需要重新输入；接口不会返回口令、Webhook 或签名密钥。`.env` 和运行数据目录已被 Git 与 Docker 构建排除。
 
 Compose 使用命名卷 `monitor-data` 保存 `monitor.json`。普通重建／重启不会丢失规则；不要在需要保留数据时执行 `docker compose down -v`。后台采用串行写入、原子替换和磁盘同步；磁盘写入失败会暂停告警并在页面状态中显示原因，修复磁盘后重启。
+
+一键部署用户可直接重复执行安装命令完成升级。手动管理自动 HTTPS 部署时，为下方的 Compose 命令加入 `-f compose.yaml -f compose.https.yaml`，例如 `docker compose -f compose.yaml -f compose.https.yaml up -d --build`，以便同时管理 Caddy。
 
 ```bash
 # 升级代码并重建，保留数据卷
@@ -123,7 +161,7 @@ npm run check
 
 访问 `http://127.0.0.1:3000/`。首次运行先生成 `.env`；已有配置时跳过初始化。Windows 原生开发异常退出时，确认旧进程结束后移除 `data/monitor.lock` 再启动；Linux 使用自动释放的内核锁。
 
-GitHub Actions 在 Ubuntu 上运行测试、构建 Docker 镜像，并验证 HTTP 服务、保存配置和 `SIGKILL` 后重启的数据保留。测试使用伪造通知接收端，不向真实飞书群发送。
+GitHub Actions 在 Ubuntu 上运行测试、构建 Docker 镜像，并验证 HTTP 服务、保存配置、`SIGKILL` 后重启，以及一键安装器的首次部署、重复升级和配置／数据保留。安装器单元测试不调用宿主机包管理器；完整安装测试复用 CI 已安装的 Docker。测试使用伪造通知接收端，不向真实飞书群发送。
 
 ## 数据来源与价格口径
 
